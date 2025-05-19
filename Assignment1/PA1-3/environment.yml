@@ -1,0 +1,21 @@
+name: a1
+channels:
+  - pytorch
+  - conda-forge
+  - apple
+dependencies:
+  - python=3.11 # ← downgraded from 3.12
+  - numpy=1.24.3
+  - matplotlib=3.8.0
+  - opencv=4.10.0
+  - scipy=1.14.1
+  - tqdm=4.65.0
+  - pygame=2.6.1
+  - gymnasium=0.29.1
+  - pytorch=2.1.1 # CPU-only build
+  - torchvision=0.16.1 # now compatible with py3.11
+  - cpuonly
+  - pip
+  - pip:
+      - tensorflow-macos==2.14.0
+      - tensorflow==2.14.0
