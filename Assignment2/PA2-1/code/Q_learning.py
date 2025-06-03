@@ -1,25 +1,20 @@
-import time
 import pickle
 import numpy as np
-from vis_gym import *
+from vis_gym import setup, game, refresh
 
-gui_flag = False  # Set to True to enable the game state visualization
+gui_flag = False
 setup(GUI=gui_flag)
-env = game  # Gym / Gymnasium environment from vis_gym
+env = game
 
 def get_obs(reset_output):
-    """
-    Helper: grab the observation dict from env.reset().
-    env.reset() may return:
-      - just obs, or
-      - (obs, info), or
-      - (obs, done, info), etc.
-    We always treat the very first element as the observation.
-    """
-    if isinstance(reset_output, tuple) or isinstance(reset_output, list):
-        return reset_output[0]
-    else:
-        return reset_output
+    return reset_output[0] if isinstance(reset_output, (tuple, list)) else reset_output
+
+def parse_step(step_output):
+    if len(step_output) == 4:
+        return step_output
+    next_obs, reward, terminated, truncated, info = step_output
+    done = terminated or truncated
+    return next_obs, reward, done, info
 
 def hash(obs):
     x, y = obs['player_position']
@@ -29,18 +24,47 @@ def hash(obs):
         g = 0
     else:
         g = int(g[-1])
-    return x * (5*3*5) + y * (3*5) + h * 5 + g
+    return x * (5 * 3 * 5) + y * (3 * 5) + h * 5 + g
 
-def Q_learning(num_episodes=10000, gamma=0.9, epsilon=1.0, decay_rate=0.99999):
-    """
-    Run Q-learning for num_episodes. Returns a dict: {state_hash: np.array([Q(s,0),…,Q(s,5)])}.
-    """
+def estimate_victory_probability(num_episodes=100000):
+    n_guards = len(env.guards)  # should be 4
+    wins = np.zeros(n_guards, dtype=float)
+    visits = np.zeros(n_guards, dtype=float)
+    FIGHT_ACTION = 5
+
+    for _ in range(num_episodes):
+        raw = env.reset()
+        obs = get_obs(raw)
+        done = False
+
+        while not done:
+            guard_str = obs['guard_in_cell']
+            health_before = obs['player_health']
+            action = np.random.randint(env.action_space.n)
+            step_out = env.step(action)
+            next_obs, reward, done, info = parse_step(step_out)
+
+            if guard_str is not None and action == FIGHT_ACTION:
+                guard_id = int(guard_str[-1])
+                idx = guard_id - 1
+                health_after = next_obs['player_health']
+                if health_after == health_before:
+                    wins[idx] += 1
+                visits[idx] += 1
+
+            obs = next_obs
+
+    P = np.zeros(n_guards, dtype=float)
+    nonzero = visits > 0
+    P[nonzero] = wins[nonzero] / visits[nonzero]
+    return P
+
+def Q_learning(num_episodes, gamma=0.9, epsilon=1.0, decay_rate=0.99999):
     Q_table = {}
     N_table = {}
-    n_actions = env.action_space.n  # should be 6 (UP, DOWN, LEFT, RIGHT, FIGHT, HIDE)
+    n_actions = env.action_space.n  # should be 6
 
     for episode in range(num_episodes):
-        # Correctly unpack just the observation:
         raw = env.reset()
         obs = get_obs(raw)
         done = False
@@ -50,49 +74,27 @@ def Q_learning(num_episodes=10000, gamma=0.9, epsilon=1.0, decay_rate=0.99999):
 
         while not done:
             state = hash(obs)
-
             if state not in Q_table:
                 Q_table[state] = np.zeros(n_actions, dtype=float)
                 N_table[state] = np.zeros(n_actions, dtype=int)
 
-            # ε‐greedy action selection
             if np.random.rand() < epsilon:
                 action = np.random.randint(n_actions)
             else:
                 action = int(np.argmax(Q_table[state]))
 
-            # Step the env
-            next_raw = env.step(action)
-            # env.step(...) in Gym/Gymnasium always returns at least (obs, reward, done, info)
-            # so we can unpack:
-            if len(next_raw) == 4:
-                next_obs, reward, done, info = next_raw
-            else:
-                # e.g. if it returns (obs, reward, terminated, truncated, info)
-                next_obs = next_raw[0]
-                reward = next_raw[1]
-                # If there is a “terminated” and “truncated” pair, treat done = either of them
-                if len(next_raw) == 5:
-                    terminated, truncated = next_raw[2], next_raw[3]
-                    done = terminated or truncated
-                    info = next_raw[4]
-                else:
-                    # fallback—grab the usual positions
-                    done = next_raw[2]
-                    info = next_raw[-1]
+            step_out = env.step(action)
+            next_obs, reward, done, info = parse_step(step_out)
 
             next_state = hash(next_obs)
-
             if next_state not in Q_table:
                 Q_table[next_state] = np.zeros(n_actions, dtype=float)
                 N_table[next_state] = np.zeros(n_actions, dtype=int)
 
-            # Learning rate α = 1/(1 + N(s,a))
             alpha = 1.0 / (1 + N_table[state][action])
             best_next = np.max(Q_table[next_state])
             td_target = reward + gamma * best_next
             td_error = td_target - Q_table[state][action]
-
             Q_table[state][action] += alpha * td_error
             N_table[state][action] += 1
 
@@ -100,77 +102,16 @@ def Q_learning(num_episodes=10000, gamma=0.9, epsilon=1.0, decay_rate=0.99999):
 
     return Q_table
 
-# Choose a decay rate that decays epsilon slowly for many episodes
-decay_rate = 0.99999
+if __name__ == "__main__":
+    # Only run training when invoked directly — the grader will import functions instead.
+    NUM_EPISODES = 1_000_000
+    GAMMA = 0.9
+    EPSILON_START = 1.0
+    DECAY_RATE = 0.99999
 
-# Run Q-learning (this time, get_obs handles reset’s extra values)
-Q_table = Q_learning(num_episodes=1000000, gamma=0.9, epsilon=1.0, decay_rate=decay_rate)
+    print("Training Q-learning (this runs ~1 000 000 episodes)...")
+    Q_table = Q_learning(NUM_EPISODES, gamma=GAMMA, epsilon=EPSILON_START, decay_rate=DECAY_RATE)
 
-with open('Q_table.pickle', 'wb') as handle:
-    pickle.dump(Q_table, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-
-# ---------------- Test-play snippet ----------------
-# Save this in a separate file (e.g. test_play.py) or paste below your training code.
-#
-# import pickle
-# import numpy as np
-# from vis_gym import setup, game, refresh
-#
-# gui_flag = True
-# setup(GUI=gui_flag)
-# env = game
-#
-# def get_obs(reset_output):
-#     if isinstance(reset_output, tuple) or isinstance(reset_output, list):
-#         return reset_output[0]
-#     else:
-#         return reset_output
-#
-# def hash(obs):
-#     x, y = obs['player_position']
-#     h = obs['player_health']
-#     g = obs['guard_in_cell']
-#     if not g:
-#         g = 0
-#     else:
-#         g = int(g[-1])
-#     return x * (5*3*5) + y * (3*5) + h * 5 + g
-#
-# # Load the trained Q-table
-# with open('Q_table.pickle', 'rb') as f:
-#     Q_table = pickle.load(f)
-#
-# raw = env.reset()
-# obs = get_obs(raw)
-# done = False
-# total_reward = 0
-#
-# while not done:
-#     s = hash(obs)
-#     if s not in Q_table:
-#         action = np.random.randint(env.action_space.n)
-#     else:
-#         action = int(np.argmax(Q_table[s]))
-#
-#     next_raw = env.step(action)
-#     if len(next_raw) == 4:
-#         next_obs, reward, done, info = next_raw
-#     else:
-#         next_obs = next_raw[0]
-#         reward = next_raw[1]
-#         if len(next_raw) == 5:
-#             terminated, truncated = next_raw[2], next_raw[3]
-#             done = terminated or truncated
-#             info = next_raw[4]
-#         else:
-#             done = next_raw[2]
-#             info = next_raw[-1]
-#
-#     total_reward += reward
-#     if gui_flag:
-#         refresh(next_obs, reward, done, info)
-#     obs = next_obs
-#
-# print("Test episode finished. Total reward:", total_reward)
-# env.close()
+    with open("Q_table.pickle", "wb") as handle:
+        pickle.dump(Q_table, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    print("Q_table.pickle saved.")

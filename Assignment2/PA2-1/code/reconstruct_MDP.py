@@ -1,15 +1,42 @@
-import time
-import pickle
 import numpy as np
-from vis_gym import *
+from vis_gym import setup, game
 
-gui_flag = False  # Set to True to enable the game state visualization
+# Turn off GUI for speed
+gui_flag = False
 setup(GUI=gui_flag)
-env = game  # Gym environment already initialized within vis_gym.py
+env = game  # Gym/Gymnasium environment
 
-# env.render()  # Uncomment to print game state info
+
+def get_obs(reset_output):
+    """
+    Extract just the observation dict from env.reset().
+    If env.reset() returns a tuple/list, grab the first element.
+    """
+    return reset_output[0] if isinstance(reset_output, (tuple, list)) else reset_output
+
+
+def parse_step(step_output):
+    """
+    Normalize env.step(...) output into (next_obs, reward, done, info).
+    Gym/Gymnasium can return either 4 items (obs, reward, done, info)
+    or 5 items (obs, reward, terminated, truncated, info). We unify to 4.
+    """
+    if len(step_output) == 4:
+        return step_output  # (obs, reward, done, info)
+    next_obs, reward, terminated, truncated, info = step_output
+    done = terminated or truncated
+    return next_obs, reward, done, info
+
 
 def hash(obs):
+    """
+    Turn an observation into a unique integer in [0..374].
+    - obs['player_position'] = (x,y), x,y ∈ {0..4}
+    - obs['player_health'] ∈ {0,1,2}
+    - obs['guard_in_cell'] is None or 'G#'
+    Map g = 0 if None, else g = int(#). Then:
+      hash = x*(5*3*5) + y*(3*5) + h*5 + g
+    """
     x, y = obs['player_position']
     h = obs['player_health']
     g = obs['guard_in_cell']
@@ -17,156 +44,53 @@ def hash(obs):
         g = 0
     else:
         g = int(g[-1])
-    return x * (5*3*5) + y * (3*5) + h * 5 + g
+    return x * (5 * 3 * 5) + y * (3 * 5) + h * 5 + g
 
-'''
-Complete the function below to do the following:
 
-    1. Run a specified number of episodes of the game (argument num_episodes). An episode refers to starting in some initial
-       configuration and taking actions until a terminal state is reached.
-    2. Instead of saving all gameplay history, maintain and update Q-values for each state-action pair that your agent encounters in a dictionary.
-    3. Use the Q-values to select actions in an epsilon-greedy manner. Refer to assignment instructions for a refresher on this.
-    4. Update the Q-values using the Q-learning update rule. Refer to assignment instructions for a refresher on this.
-
-    Some important notes:
-        
-        - The state space is defined by the player's position (x,y), the player's health (h), and the guard in the cell (g).
-        
-        - To simplify the representation of the state space, each state may be hashed into a unique integer value using the hash function provided above.
-          For instance, the observation {'player_position': (1, 2), 'player_health': 2, 'guard_in_cell='G4'} 
-          will be hashed to 1*5*3*5 + 2*3*5 + 2*5 + 4 = 119. There are 375 unique states.
-
-        - Your Q-table should be a dictionary with the following format:
-
-                - Each key is a number representing the state (hashed using the provided hash() function), and each value should be an np.array
-                  of length equal to the number of actions (initialized to all zeros).
-
-                - This will allow you to look up Q(s,a) as Q_table[state][action], as well as directly use efficient numpy operators
-                  when considering all actions from a given state, such as np.argmax(Q_table[state]) within your Bellman equation updates.
-
-                - The autograder also assumes this format, so please ensure you format your code accordingly.
-  
-          Please do not change this representation of the Q-table.
-        
-        - The four actions are: 0 (UP), 1 (DOWN), 2 (LEFT), 3 (RIGHT), 4 (FIGHT), 5 (HIDE)
-
-        - Don't forget to reset the environment to the initial configuration after each episode by calling:
-          obs, reward, done, info = env.reset()
-
-        - The value of eta is unique for every (s,a) pair, and should be updated as 1/(1 + number of updates to Q_opt(s,a)).
-
-        - The value of epsilon is initialized to 1. You are free to choose the decay rate.
-          No default value is specified for the decay rate, experiment with different values to find what works.
-
-        - To refresh the game screen if using the GUI, use the refresh(obs, reward, done, info) function, with the 'if gui_flag:' condition.
-          Example usage below. This function should be called after every action.
-          if gui_flag:
-              refresh(obs, reward, done, info)  # Update the game screen [GUI only]
-
-    Finally, return the dictionary containing the Q-values (called Q_table).
-
-'''
-
-def Q_learning(num_episodes=10000, gamma=0.9, epsilon=1.0, decay_rate=0.99999):
+def estimate_victory_probability(num_episodes=1000000):
     """
-    Run Q-learning algorithm for a specified number of episodes.
-
-    Parameters:
-    - num_episodes (int): Number of episodes to run.
-    - gamma (float): Discount factor.
-    - epsilon (float): Exploration rate.
-    - decay_rate (float): Rate at which epsilon decays. Epsilon is decayed as epsilon = epsilon * decay_rate after each episode.
-
-    Returns:
-    - Q_table (dict): Dictionary containing the Q-values for each state-action pair.
+    Estimate P(defeat G_i | fight from full health) for i=1..4 under a random policy.
+    Only count fights when player_health == 2 before initiating the fight.
+    Returns a length-4 array P, where P[i] is the win-rate vs G{i+1}.
     """
-    # Initialize Q-table and N-table (state-action visit counts)
-    Q_table = {}      # Q_table[state] = np.array([0, 0, 0, 0, 0, 0])
-    N_table = {}      # N_table[state] = np.array([0, 0, 0, 0, 0, 0]) to track updates per (s,a)
+    n_guards = len(env.guards)  # should be 4
+    wins = np.zeros(n_guards, dtype=float)
+    visits = np.zeros(n_guards, dtype=float)
 
-    n_actions = env.action_space.n  # should be 6: [UP, DOWN, LEFT, RIGHT, FIGHT, HIDE]
+    # Correct index for the “fight” action in vis_gym
+    FIGHT_ACTION = 4
 
-    for episode in range(num_episodes):
-        obs = env.reset()
+    for _ in range(num_episodes):
+        raw = env.reset()
+        obs = get_obs(raw)
         done = False
 
-        # Decay epsilon at the start of each episode except the first
-        if episode > 0:
-            epsilon *= decay_rate
-
         while not done:
-            state = hash(obs)
+            guard_str = obs['guard_in_cell']      # None or 'G#'
+            health_before = obs['player_health']  # 0, 1, or 2
 
-            # If state not in Q_table yet, initialize Q_table[state] and N_table[state]
-            if state not in Q_table:
-                Q_table[state] = np.zeros(n_actions, dtype=float)
-                N_table[state] = np.zeros(n_actions, dtype=int)
+            action = np.random.randint(env.action_space.n)
+            step_out = env.step(action)
+            next_obs, reward, done, info = parse_step(step_out)
 
-            # Epsilon-greedy action selection
-            if np.random.rand() < epsilon:
-                action = np.random.randint(n_actions)
-            else:
-                # Choose action with highest Q-value (break ties arbitrarily via argmax)
-                action = int(np.argmax(Q_table[state]))
+            # Only record if we were at full health (h == 2) and chose “fight”
+            if guard_str is not None and action == FIGHT_ACTION and health_before == 2:
+                guard_id = int(guard_str[-1])  # e.g. 'G3' → 3
+                idx = guard_id - 1
+                health_after = next_obs['player_health']
+                if health_after == health_before:
+                    wins[idx] += 1
+                visits[idx] += 1
 
-            # Take action in the environment
-            next_obs, reward, done, info = env.step(action)
-
-            next_state = hash(next_obs)
-
-            # If next_state is unseen, initialize its Q and N entries
-            if next_state not in Q_table:
-                Q_table[next_state] = np.zeros(n_actions, dtype=float)
-                N_table[next_state] = np.zeros(n_actions, dtype=int)
-
-            # Compute learning rate alpha = 1 / (1 + number of times we've updated Q[state][action])
-            alpha = 1.0 / (1 + N_table[state][action])
-
-            # Q-learning update:
-            # Q(s,a) = Q(s,a) + alpha * [r + gamma * max_a' Q(next_s, a') - Q(s,a)]
-            best_next = np.max(Q_table[next_state])
-            td_target = reward + gamma * best_next
-            td_error = td_target - Q_table[state][action]
-            Q_table[state][action] += alpha * td_error
-
-            # Increment the visit count for this (state, action)
-            N_table[state][action] += 1
-
-            # Move to next state
             obs = next_obs
 
-    return Q_table
-
-# Choose a decay rate (tuned for 1,000,000 episodes so epsilon decays slowly)
-decay_rate = 0.99999
-
-# Run Q-learning for 1,000,000 episodes
-Q_table = Q_learning(num_episodes=1000, gamma=0.9, epsilon=1.0, decay_rate=decay_rate)
-
-# Save the Q-table dict to a file
-with open('Q_table.pickle', 'wb') as handle:
-    pickle.dump(Q_table, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    P = np.zeros(n_guards, dtype=float)
+    nonzero = visits > 0
+    P[nonzero] = wins[nonzero] / visits[nonzero]
+    return P
 
 
-'''
-Uncomment the code below to play an episode using the saved Q-table. Useful for debugging/visualization.
-
-Comment before final submission or autograder may fail.
-'''
-
-# # To load the Q-table:
-# Q_table = pickle.load(open('Q_table.pickle', 'rb'))
-
-# obs, reward, done, info = env.reset()
-# total_reward = 0
-# while not done:
-#     state = hash(obs)
-#     action = int(np.argmax(Q_table[state]))
-#     obs, reward, done, info = env.step(action)
-#     total_reward += reward
-#     if gui_flag:
-#         refresh(obs, reward, done, info)  # Update the game screen [GUI only]
-
-# print("Total reward:", total_reward)
-
-# env.close()  # Close the environment
+if __name__ == "__main__":
+    NUM_EPISODES = 1_000_000
+    P_est = estimate_victory_probability(num_episodes=NUM_EPISODES)
+    print(f"Estimated win‐rates over {NUM_EPISODES} episodes: {P_est}")
